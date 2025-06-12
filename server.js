@@ -1,5 +1,5 @@
 import cors from "cors"
-import express, { response } from "express"
+import express from "express"
 import listEndpoints from 'express-list-endpoints'
 import mongoose from "mongoose"
 import crypto from "crypto"
@@ -50,7 +50,15 @@ const User = model("User", userSchema)
 
 // Middleware for authenticating users via accessToken
 const authenticateUser = async (req, res, next) => {
-  const accessToken = req.header("Authorization")
+  const accessToken = req.header("Authorization")?.replace("Bearer ", "")
+  if (!accessToken) {
+    return res.status(401).json({
+      success: false,
+      response: null,
+      message: "Unauthorized: No access token provided."
+    })
+  }
+
   try {
     const user = await User.findOne({ accessToken: accessToken })
 
@@ -73,26 +81,43 @@ const authenticateUser = async (req, res, next) => {
   }
 }
 
-app.post("/users", (req, res) => {
+app.post("/users", async (req, res) => {
   try {
     const { name, email, password } = req.body
     const salt = bcrypt.genSaltSync()
     const user = new User({ name, email, password: bcrypt.hashSync(password, salt) })
-    user.save()
+    await user.save() 
+
     res.status(201).json({
       success: true,
-      message: "User created",
-      id: user._id,
-      accessToken: user.accessToken,
-      name: user.name,
-      email: user.email
+      message: "User created successfully",
+      response: {
+        id: user._id,
+        accessToken: user.accessToken,
+        name: user.name,
+        email: user.email
+      }
     })
   } catch (error) {
-    res.status(400).json({
-      success: false,
-      message: "Could not create user",
-      errors: error
-    })
+    if (error.code === 11000) {
+      res.status(409).json({
+        success: false,
+        response: error,
+        message: "User with this name or email already exists."
+      })
+    } else if (error.name === 'ValidationError') {
+      res.status(400).json({
+        success: false,
+        response: error.errors,
+        message: "Validation failed for user creation."
+      })
+    } else {
+      res.status(500).json({
+        success: false,
+        response: error,
+        message: "Failed to create user."
+      })
+    }
   }
 })
 
@@ -105,6 +130,7 @@ app.get("/secrets", authenticateUser, (req, res) => {
     message: "Secret retrieved successfully."
   })
 })
+
 app.post("/sessions", async (req, res) => {
   const { email, password } = req.body
   try {
@@ -207,7 +233,7 @@ app.get("/thoughts", async (req, res) => {
   const query = {}
 
   if (id) {
-    query._id = id;
+    query._id = id
   }
 
 //Filter to get the messages with at least the amount of hearts that the user asks for
@@ -231,19 +257,21 @@ if (hearts) {
 
 //Sort the messages for date created and amount of hearts
 const sortOptions = {}
-if (sort) {
-  if (sort === 'createdAt') {
-    sortOptions.createdAt = -1; // Newest first
-  } else if (sort === 'hearts') {
-    sortOptions.hearts = -1; // Most hearts first
-  } else {
-    return res.status(400).json({
-      success: false,
-      response: null,
-      message: "Invalid 'sort' parameter. Valid options are 'createdAt' or 'hearts'."
-    })
+  if (sort) {
+    if (sort === 'createdAt_desc' || sort === 'createdAt') {
+      sortOptions.createdAt = -1
+    } else if (sort === 'createdAt_asc') {
+      sortOptions.createdAt = 1
+    } else if (sort === 'hearts') {
+      sortOptions.hearts = -1
+    } else {
+      return res.status(400).json({
+        success: false,
+        response: null,
+        message: "Invalid 'sort' parameter. Valid options are 'createdAt_desc', 'createdAt_asc', or 'hearts'."
+      })
+    }
   }
-}
 
 //Let the user choose to view a specific amount of thoughts per page and also to go between pages
   const pageNum = parseInt(page, 10) || 1 //Default to page 1
@@ -308,9 +336,10 @@ app.get("/thoughts/:id/", async (req, res) => {
 })
 
 //Post endpoint
-app.post("/thoughts", async (req, res) => {
+app.post("/thoughts", authenticateUser, async (req, res) => {
 
   const {message} = req.body
+  const userId = req.user._id
 
   try {
     const newThought = await new Thought ({message, userId}).save()
@@ -338,10 +367,10 @@ app.post("/thoughts", async (req, res) => {
 })
 
 //Delete endpoint: delete a thought by ID
-app.delete("/thoughts/:id", async (req, res) => {
+app.delete("/thoughts/:id", authenticateUser, async (req, res) => {
 
     const { id } = req.params
-    const { userId } = req.body
+    const authenticatedUserId = req.user._id
 
     try {
       const thoughtToDelete = await Thought.findById(id)
@@ -354,7 +383,7 @@ app.delete("/thoughts/:id", async (req, res) => {
         })
       }
 
-    if (thoughtToDelete.userId !==userId) {
+    if (thoughtToDelete.userId.toString() !== authenticatedUserId.toString()) {
       return res.status(403).json({
         success: false,
         response: null,
@@ -379,43 +408,13 @@ app.delete("/thoughts/:id", async (req, res) => {
 })
 
 // Patch endpoint: update a thought by ID
-app.patch("/thoughts/:id", async (req, res) => {
-
-  const { id } = req.params
-  const { newMessage } = req.body
-
-  try {
-    const updatedThought = await Thought.findByIdAndUpdate ( id, { message: newMessage }, {new: true, runValidators: true})
-
-    if(!updatedThought) {
-      return res.status(404).json({
-        success: false,
-        response: null,
-        message: "Thought could not be found."
-      })
-    }
-
-    res.status(200).json({
-      success: true,
-      response: updatedThought,
-      message: "Thought was successfully updated"
-    })
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      response: error,
-      message: "Could not edit thought."
-    })
-  }
-})
-
 app.patch("/thoughts/:id/like", async (req, res) => {
   const { id } = req.params
 
   try {
     const updatedThought = await Thought.findByIdAndUpdate(
       id,
-      { $inc: { hearts: 1 } }, //mongoDB operator to increment a field
+      { $inc: { hearts: 1 } },
       { new: true }
     )
 
@@ -442,10 +441,11 @@ app.patch("/thoughts/:id/like", async (req, res) => {
   }
 })
 
-// Patch endpoint: update a thought by ID (for message and unlike)
-app.patch("/thoughts/:id", async (req, res) => {
+// Patch endpoint: update a thought by ID (for message and unlike, now authenticated and authorized)
+app.patch("/thoughts/:id", authenticateUser, async (req, res) => {
   const { id } = req.params
-  const { message, unlike, userId } = req.body
+  const { message, unlike } = req.body
+  const authenticatedUserId = req.user._id
 
   try {
     const thought = await Thought.findById(id)
@@ -462,12 +462,11 @@ app.patch("/thoughts/:id", async (req, res) => {
     let performUpdate = false
 
     if (message !== undefined) {
-
-      if(thought.userId !== undefined) {
+      if (thought.userId.toString() !== authenticatedUserId.toString()) {
         return res.status(403).json({
           success: false,
           response: null,
-          message: "You are not authorized to edit this thought's message.",
+          message: "You are not authorized to edit this thought's message."
         })
       }
       updateFields.message = message
@@ -490,7 +489,7 @@ app.patch("/thoughts/:id", async (req, res) => {
         message: "No valid update fields provided, thought not modified."
       })
     }
-    
+
     const updatedThought = await Thought.findByIdAndUpdate(
       id,
       updateFields,
