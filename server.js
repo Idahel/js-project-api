@@ -269,6 +269,107 @@ app.patch("/thoughts/:id", async (req, res) => {
   }
 })
 
+app.patch("/thoughts/:id/like", async (req, res) => {
+  const { id } = req.params
+
+  try {
+    // Find the thought and increment its 'hearts' field by 1
+    const updatedThought = await Thought.findByIdAndUpdate(
+      id,
+      { $inc: { hearts: 1 } }, // MongoDB operator to increment a field
+      { new: true } // Return the updated document
+    )
+
+    if (!updatedThought) {
+      return res.status(404).json({
+        success: false,
+        response: null,
+        message: "Thought could not be found to like."
+      })
+    }
+
+    res.status(200).json({
+      success: true,
+      response: updatedThought,
+      message: "Thought successfully liked."
+    })
+
+  } catch (error) {
+    res.status(400).json({ // Use 400 for bad ID format, 500 for other server errors
+      success: false,
+      response: error,
+      message: "Failed to like thought due to invalid ID or server error."
+    })
+  }
+})
+
+// Patch endpoint: update a thought by ID (for message and unlike)
+// This endpoint specifically handles message updates and unliking.
+app.patch("/thoughts/:id", async (req, res) => {
+  const { id } = req.params
+  const { message, unlike } = req.body
+
+  try {
+    const thought = await Thought.findById(id)
+
+    if (!thought) {
+      return res.status(404).json({
+        success: false,
+        response: null,
+        message: "Thought could not be found."
+      })
+    }
+
+    const updateFields = {}
+    if (message !== undefined) {
+      updateFields.message = message
+    }
+
+    let newHearts = thought.hearts
+    if (unlike) {
+      newHearts = Math.max(0, thought.hearts - 1)
+    }
+
+    if (newHearts !== thought.hearts || message !== undefined) {
+      updateFields.hearts = newHearts
+    }
+
+    const updatedThought = await Thought.findByIdAndUpdate(
+      id,
+      updateFields,
+      { new: true, runValidators: true }
+    )
+
+    if(!updatedThought) {
+      return res.status(404).json({
+        success: false,
+        response: null,
+        message: "Thought could not be found after update attempt."
+      })
+    }
+
+    res.status(200).json({
+      success: true,
+      response: updatedThought,
+      message: "Thought was successfully updated."
+    })
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      res.status(400).json({
+        success: false,
+        response: error.errors,
+        message: "Validation failed for thought update."
+      })
+    } else {
+      res.status(500).json({
+        success: false,
+        response: error,
+        message: "Could not edit thought."
+      })
+    }
+  }
+})
+
 // Start the server
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`)
