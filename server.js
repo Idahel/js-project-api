@@ -2,12 +2,14 @@ import cors from "cors"
 import express, { response } from "express"
 import listEndpoints from 'express-list-endpoints'
 import mongoose from "mongoose"
-
+import crypto from "crypto"
+import bcrypt from "bcrypt"
 
 import thoughtData from "./data.json"
 
 const mongoUrl = process.env.MONGO_URL || "mongodb://localhost/happyThoughts"
 mongoose.connect(mongoUrl)
+mongoose.Promise = Promise
 
 // Defines the port the app will run on. Defaults to 8080, but can be overridden
 // when starting the server. Example command to overwrite PORT env variable value:
@@ -19,8 +21,123 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
+
+// Authentication
+const { Schema, model } = mongoose
+
+const userSchema = new Schema({
+  name: {
+    type: String,
+    unique: true,
+    required: true
+  },
+  email: { 
+    type: String,
+    unique: true,
+    required: true
+  },
+  password: {
+    type: String,
+    required: true
+  },
+  accessToken: {
+    type: String,
+    default: () => crypto.randomBytes(128).toString("hex")
+  }
+})
+
+const User = model("User", userSchema)
+
+// Middleware for authenticating users via accessToken
+const authenticateUser = async (req, res, next) => {
+  const accessToken = req.header("Authorization")
+  try {
+    const user = await User.findOne({ accessToken: accessToken })
+
+    if (user) {
+      req.user = user
+      next()
+    } else {
+      res.status(401).json({
+        success: false,
+        response: null,
+        message: "Unauthorized: Access token invalid or missing."
+      })
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      response: error,
+      message: "Server error during authentication."
+    })
+  }
+}
+
+app.post("/users", (req, res) => {
+  try {
+    const { name, email, password } = req.body
+    const salt = bcrypt.genSaltSync()
+    const user = new User({ name, email, password: bcrypt.hashSync(password, salt) })
+    user.save()
+    res.status(201).json({
+      success: true,
+      message: "User created",
+      id: user._id,
+      accessToken: user.accessToken,
+      name: user.name,
+      email: user.email
+    })
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: "Could not create user",
+      errors: error
+    })
+  }
+})
+
+app.get("/secrets", authenticateUser, (req, res) => {
+  res.status(200).json({
+    success: true,
+    response: {
+      secret: `This is a secret, accessible only to authenticated user: ${req.user.name}`
+    },
+    message: "Secret retrieved successfully."
+  })
+})
+app.post("/sessions", async (req, res) => {
+  const { email, password } = req.body
+  try {
+    const user = await User.findOne({ email: email })
+
+    if (user && bcrypt.compareSync(password, user.password)) {
+      res.status(200).json({
+        success: true,
+        response: {
+          userId: user._id,
+          accessToken: user.accessToken,
+          name: user.name
+        },
+        message: "Login successful."
+      })
+    } else {
+      res.status(401).json({
+        success: false,
+        response: null,
+        message: "Login failed: Invalid email or password."
+      })
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      response: error,
+      message: "Server error during login."
+    })
+  }
+})
+
+//Thoughts
 const thoughtSchema = new mongoose.Schema({
-  id: Number,
   message: {
     type: String,
     required: true,
@@ -35,6 +152,10 @@ const thoughtSchema = new mongoose.Schema({
   createdAt: {
     type: Date,
     default: () => new Date()
+  },
+  userId: {
+    type: String,
+    required: true
   }
 })
 
@@ -46,16 +167,16 @@ if (process.env.RESET_DB){
       await Thought.deleteMany({})
 
       for (const thought of thoughtData) {
-
         const newThought = new Thought({
           message: thought.message,
           hearts: thought.hearts || 0,
-          createdAt: thought.createdAt ? new Date(thought.createdAt) : new Date()
+          createdAt: thought.createdAt ? new Date(thought.createdAt) : new Date(),
+          userId: thought.userId || 'seed-user-id'
         })
         await newThought.save()
       }
     } catch (error) {
-      console.error("Error seeding database:", error)
+      console.error(error)
     }
   }
   seedDatabase()
@@ -81,11 +202,13 @@ app.get("/", (req, res) => {
 
 app.get("/thoughts", async (req, res) => {
 
-  const { hearts, message, page, limit, sort } = req.query
+  const { hearts, message, page, limit, sort, id } = req.query
 
   const query = {}
 
-  let filteredThoughts = [...thoughtData]
+  if (id) {
+    query._id = id;
+  }
 
 //Filter to get the messages with at least the amount of hearts that the user asks for
 if (hearts) {
@@ -185,13 +308,12 @@ app.get("/thoughts/:id/", async (req, res) => {
 })
 
 //Post endpoint
-
 app.post("/thoughts", async (req, res) => {
 
   const {message} = req.body
 
   try {
-    const newThought = await new Thought ({message}).save()
+    const newThought = await new Thought ({message, userId}).save()
 
     res.status(201).json({
       success: true,
@@ -199,36 +321,55 @@ app.post("/thoughts", async (req, res) => {
       message: "Thought created successfully"
     })
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      response: error,
-      message: "Failed to create thought."
-    })
+    if (error.name === 'ValidationError') {
+      res.status(400).json({
+        success: false,
+        response: error.errors,
+        message: "Validation failed for thought creation."
+      })
+    } else {
+      res.status(500).json({
+        success: false,
+        response: error,
+        message: "Failed to create thought."
+      })
+    }
   }
 })
 
 //Delete endpoint: delete a thought by ID
-
 app.delete("/thoughts/:id", async (req, res) => {
 
-  const { id } = req.params
+    const { id } = req.params
+    const { userId } = req.body
 
-  try {
-    const deletedThought = await Thought.findByIdAndDelete(id)
+    try {
+      const thoughtToDelete = await Thought.findById(id)
 
-    if(!deletedThought) {
-      return res.status(404).json({
+      if (!thoughtToDelete) {
+        return res.status(404).json({
+          success: false,
+          response: null,
+          message:"Thought could not be found, can't delete."
+        })
+      }
+
+    if (thoughtToDelete.userId !==userId) {
+      return res.status(403).json({
         success: false,
         response: null,
-        message: "Thought could not be found, can't delete."
+        message: "You are not authorized to delete this thought."
       })
     }
+
+    const deletedThought = await Thought.findByIdAndDelete(id)
+
     res.status(200).json({
       success: true,
       response: deletedThought,
       message: "Thought was successfully deleted."
     })
-  } catch {
+  } catch (error) {
     res.status(500).json({
       success: false,
       response: error,
@@ -238,7 +379,6 @@ app.delete("/thoughts/:id", async (req, res) => {
 })
 
 // Patch endpoint: update a thought by ID
-
 app.patch("/thoughts/:id", async (req, res) => {
 
   const { id } = req.params
@@ -273,11 +413,10 @@ app.patch("/thoughts/:id/like", async (req, res) => {
   const { id } = req.params
 
   try {
-    // Find the thought and increment its 'hearts' field by 1
     const updatedThought = await Thought.findByIdAndUpdate(
       id,
-      { $inc: { hearts: 1 } }, // MongoDB operator to increment a field
-      { new: true } // Return the updated document
+      { $inc: { hearts: 1 } }, //mongoDB operator to increment a field
+      { new: true }
     )
 
     if (!updatedThought) {
@@ -295,7 +434,7 @@ app.patch("/thoughts/:id/like", async (req, res) => {
     })
 
   } catch (error) {
-    res.status(400).json({ // Use 400 for bad ID format, 500 for other server errors
+    res.status(400).json({
       success: false,
       response: error,
       message: "Failed to like thought due to invalid ID or server error."
@@ -304,10 +443,9 @@ app.patch("/thoughts/:id/like", async (req, res) => {
 })
 
 // Patch endpoint: update a thought by ID (for message and unlike)
-// This endpoint specifically handles message updates and unliking.
 app.patch("/thoughts/:id", async (req, res) => {
   const { id } = req.params
-  const { message, unlike } = req.body
+  const { message, unlike, userId } = req.body
 
   try {
     const thought = await Thought.findById(id)
@@ -321,19 +459,38 @@ app.patch("/thoughts/:id", async (req, res) => {
     }
 
     const updateFields = {}
+    let performUpdate = false
+
     if (message !== undefined) {
+
+      if(thought.userId !== undefined) {
+        return res.status(403).json({
+          success: false,
+          response: null,
+          message: "You are not authorized to edit this thought's message.",
+        })
+      }
       updateFields.message = message
+      performUpdate = true
     }
 
     let newHearts = thought.hearts
     if (unlike) {
       newHearts = Math.max(0, thought.hearts - 1)
+      if (newHearts !== thought.hearts) {
+        updateFields.hearts = newHearts
+        performUpdate = true
+      }
     }
 
-    if (newHearts !== thought.hearts || message !== undefined) {
-      updateFields.hearts = newHearts
+    if (!performUpdate) {
+      return res.status(200).json({
+        success: true,
+        response: thought,
+        message: "No valid update fields provided, thought not modified."
+      })
     }
-
+    
     const updatedThought = await Thought.findByIdAndUpdate(
       id,
       updateFields,
