@@ -140,7 +140,7 @@ app.post("/sessions", async (req, res) => {
       res.status(200).json({
         success: true,
         response: {
-          userId: user._id,
+          id: user._id,
           accessToken: user.accessToken,
           name: user.name
         },
